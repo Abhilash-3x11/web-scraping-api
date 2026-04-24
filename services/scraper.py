@@ -106,13 +106,9 @@ async def _fetch_page_content(url: str, max_chars: int = 2000) -> str:
     try:
         async with async_playwright() as p:
             browser = await p.chromium.connect_over_cdp(
-                "wss://chrome.browserless.io?token=YOUR_API_KEY_HERE"
+                "wss://chrome.browserless.io/chromium?token=2UOWCOBFSNBWTTncd4bc93d4394d0b27d022c9d5351201ff1"
             )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                locale="en-IN",
-                timezone_id="Asia/Kolkata"
-            )
+            context = await browser.new_context()
             page = await context.new_page()
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -157,14 +153,9 @@ async def _do_google_search(query: str, max_results: int, detected_type: str) ->
 
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(
-            "wss://chrome.browserless.io?token=YOUR_API_KEY_HERE"
+            "wss://chrome.browserless.io/chromium?token=2UOWCOBFSNBWTTncd4bc93d4394d0b27d022c9d5351201ff1"
         )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            locale="en-IN",
-            timezone_id="Asia/Kolkata", 
-            extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"}
-        )
+        context = await browser.new_context()
         
         # 🔥 ADVANCED STEALTH
         await context.add_init_script("""
@@ -284,12 +275,9 @@ async def _do_news_search(query: str, max_results: int) -> list:
 
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(
-            "wss://chrome.browserless.io?token=YOUR_API_KEY_HERE"
+            "wss://chrome.browserless.io/chromium?token=2UOWCOBFSNBWTTncd4bc93d4394d0b27d022c9d5351201ff1"
         )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0",
-            locale="en-IN"
-        )
+        context = await browser.new_context()
         
         await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => false });")
         page = await context.new_page()
