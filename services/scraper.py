@@ -7,9 +7,7 @@ import pytz
 from playwright.async_api import async_playwright
 
 # ⚠️ PASTE YOUR BROWSERLESS API KEY HERE ⚠️
-# Added &stealth=true to bypass Google Bot Detection natively
 BROWSERLESS_URL = "wss://chrome.browserless.io/chromium?token=2UOWCOBFSNBWTTncd4bc93d4394d0b27d022c9d5351201ff1&stealth=true"
-
 
 def get_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -131,7 +129,7 @@ async def _fetch_page_content(url: str, snippet: str = "", max_chars: int = 2000
             )
             page = await context.new_page()
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=12000)
                 await page.wait_for_timeout(1000)
                 
                 await page.evaluate("""
@@ -177,28 +175,35 @@ async def _do_google_search(query: str, max_results: int, detected_type: str) ->
             extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"}
         )
 
+        # 🔥 COOKIE BYPASS: Automatically accepts Google's consent screen 
+        # so it never blocks the search results
+        await context.add_cookies([{
+            "name": "CONSENT",
+            "value": "YES+cb.20230501-11-p0.en+FX+111",
+            "domain": ".google.com",
+            "path": "/"
+        }])
+
         page = await context.new_page()
 
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(1500)
-
-            # 🔥 AUTO-CLICK GOOGLE COOKIE CONSENT BANNER IF IT APPEARS
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            
+            # Ensure the actual search results have loaded
             try:
-                if await page.locator("button:has-text('Reject all')").count() > 0:
-                    await page.locator("button:has-text('Reject all')").first.click()
-                    await page.wait_for_timeout(1500)
-                elif await page.locator("button:has-text('Accept all')").count() > 0:
-                    await page.locator("button:has-text('Accept all')").first.click()
-                    await page.wait_for_timeout(1500)
+                await page.wait_for_selector("div#search, div#main", timeout=5000)
             except Exception:
                 pass
+                
+            await page.wait_for_timeout(1000)
 
+            # 🔥 ENHANCED PARSER: Handles Top Stories, News Carousels, and Standard Links
             results_data = await page.evaluate("""
                 (typeStr) => {
                     const items = [];
                     const seenUrls = new Set();
 
+                    // 1) Time Extraction
                     if (typeStr === 'time') {
                         const timeBox = document.querySelector('div[role="heading"][aria-level="3"], .gsrt.vk_bk');
                         const locBox = document.querySelector('span.vk_gy.vk_sh');
@@ -212,6 +217,7 @@ async def _do_google_search(query: str, max_results: int, detected_type: str) ->
                         }
                     }
 
+                    // 2) Sports Extraction
                     if (typeStr === 'sports') {
                         const sportsBox = document.querySelector('div.imso_mh__mh-xs, div.imso-loa, div[data-attrid="match_details"], .imspo_mt__mt-t');
                         if (sportsBox) {
@@ -227,17 +233,29 @@ async def _do_google_search(query: str, max_results: int, detected_type: str) ->
                         }
                     }
 
+                    // 3) Universal Organic & News Parser
                     document.querySelectorAll('a').forEach(a => {
-                        const h3 = a.querySelector('h3');
-                        if (!h3) return;
-
-                        const title = h3.textContent.trim();
                         const href = a.getAttribute('href') || '';
+                        
+                        // Ignore internal Google links
+                        if (!href.startsWith('http') || href.includes('google.com')) return;
+                        if (seenUrls.has(href)) return;
 
-                        if (title && href.startsWith('http') && !href.includes('google.com/search') && !seenUrls.has(href)) {
+                        const h3 = a.querySelector('h3');
+                        const heading = a.querySelector('div[role="heading"]');
+                        let title = '';
+
+                        // Check for standard titles or Top Story Carousel titles
+                        if (h3) title = h3.textContent.trim();
+                        else if (heading) title = heading.textContent.trim();
+                        else if (a.closest('.g') || a.closest('g-card')) {
+                            title = a.textContent.trim().split('\\n')[0];
+                        }
+
+                        if (title && title.length > 10) {
                             seenUrls.add(href);
                             let snippet = '';
-                            const container = a.closest('.g, .tF2Cxc, .MjjYud, [data-sok]') || a.parentElement?.parentElement;
+                            const container = a.closest('.g, g-card, .tF2Cxc, .MjjYud');
                             if (container) {
                                 const snippetEl = container.querySelector('.VwiC3b, .yXK7lf, .MUxGbd, .lEBKkf, [style*="-webkit-line-clamp"]');
                                 if (snippetEl) snippet = snippetEl.textContent.trim();
@@ -282,19 +300,19 @@ async def _do_news_search(query: str, max_results: int) -> list:
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0",
             locale="en-IN"
         )
+        
+        await context.add_cookies([{
+            "name": "CONSENT",
+            "value": "YES+cb.20230501-11-p0.en+FX+111",
+            "domain": ".google.com",
+            "path": "/"
+        }])
+        
         page = await context.new_page()
 
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
             await page.wait_for_timeout(2000)
-
-            # 🔥 AUTO-CLICK GOOGLE COOKIE CONSENT BANNER IF IT APPEARS
-            try:
-                if await page.locator("button:has-text('Reject all')").count() > 0:
-                    await page.locator("button:has-text('Reject all')").first.click()
-                    await page.wait_for_timeout(1500)
-            except Exception:
-                pass
 
             articles = await page.query_selector_all("article")
             for article in articles:
