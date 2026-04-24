@@ -3,12 +3,33 @@ import asyncio
 import base64
 import urllib.parse
 from datetime import datetime, timezone
+import pytz
 from playwright.async_api import async_playwright
+
+# ⚠️ PASTE YOUR BROWSERLESS API KEY HERE ⚠️
+# Added &stealth=true to bypass Google Bot Detection natively
+BROWSERLESS_URL = "wss://chrome.browserless.io/chromium?token=2UOWCOBFSNBWTTncd4bc93d4394d0b27d022c9d5351201ff1&stealth=true"
 
 
 def get_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+def _get_ist_date_str() -> str:
+    ist = pytz.timezone("Asia/Kolkata")
+    return datetime.now(ist).strftime("%B %d %Y")
+
+def _get_ist_date_numeric() -> str:
+    ist = pytz.timezone("Asia/Kolkata")
+    return datetime.now(ist).strftime("%Y-%m-%d")
+
+# ─────────────────────────────────────────────
+# DOMAINS THAT BLOCK HEADLESS BROWSERS
+# ─────────────────────────────────────────────
+BOT_BLOCKED_DOMAINS = {
+    "iplt20.com", "cricbuzz.com", "espncricinfo.com",
+    "bcci.tv", "hotstar.com", "jio.com", "cricinfo.com",
+    "ndtv.com", "hindustantimes.com", "timesofindia.com"
+}
 
 # ─────────────────────────────────────────────
 # QUERY NORMALIZATION / INTENT ROUTING
@@ -32,47 +53,44 @@ BAD_TIME_DOMAINS = {"att.com", "forums", "reddit.com", "community", "apple.com"}
 GOOD_SPORT_HINTS = {"cricbuzz", "espncricinfo", "iplt20", "sports", "cricket", "score", "ndtv", "hindustantimes", "indianexpress"}
 GOOD_TIME_HINTS = {"time.is", "timeanddate", "worldometer", "nist.gov", "worldtimeserver", "clock"}
 
-
 def _clean_query(query: str) -> str:
     q = query.strip().lower()
     q = re.sub(r"[^\w\s?]", " ", q)
     q = re.sub(r"\s+", " ", q).strip()
     return q
 
-
 def _contains_any(q: str, terms: set[str]) -> bool:
     return any(term in q for term in terms)
 
-
 def _rewrite_query(query: str) -> tuple[str, str]:
     q = _clean_query(query)
+    today = _get_ist_date_str()
 
-    # 1) Sports / IPL
     if "ipl" in q or ("match" in q and _contains_any(q, SPORT_TERMS)):
         if "yesterday" in q and ("won" in q or "winner" in q):
-            return ("IPL yesterday match result winner scorecard", "sports")
+            return (f"IPL match result winner scorecard {today}", "sports")
+        if ("today" in q or "now" in q) and ("teams" in q or "playing" in q or "schedule" in q):
+            return (f"IPL today match schedule playing teams {today}", "sports")
         if "today" in q and ("won" in q or "winner" in q):
-            return ("IPL today match result winner live score", "sports")
+            return (f"IPL today match result winner live score {today}", "sports")
         if "who won" in q:
-            return ("IPL match winner score result", "sports")
-        return (f"{query} cricket IPL score result", "sports")
+            return (f"IPL match winner score result {today}", "sports")
+        if "live" in q or "score" in q:
+            return (f"{query} live score {today}", "sports")
+        return (f"{query} IPL cricket {today}", "sports")
 
-    # 2) Time
     if _contains_any(q, TIME_TERMS):
         return ("current local time in India", "time")
 
-    # 3) News
     if _contains_any(q, NEWS_TERMS):
-        return (f"{query} latest updates", "news")
+        return (f"{query} {today}", "news")
 
     return (query, "general")
-
 
 def _filter_results_for_intent(results: list[dict], detected_type: str) -> list[dict]:
     if not results:
         return []
 
-    # Always let Google's direct widgets (OneBox) bypass filters
     def passes_filter(item: dict, bad_domains: set, good_hints: set) -> bool:
         if item.get("source") == "google.com":
             return True
@@ -80,9 +98,7 @@ def _filter_results_for_intent(results: list[dict], detected_type: str) -> list[
         text = f"{item.get('title', '')} {item.get('snippet', '')} {url}".lower()
         if any(domain in url for domain in bad_domains):
             return False
-        if any(hint in text for hint in good_hints):
-            return True
-        return False
+        return any(hint in text for hint in good_hints)
 
     if detected_type == "sports":
         filtered = [item for item in results if passes_filter(item, BAD_SPORT_DOMAINS, GOOD_SPORT_HINTS)]
@@ -94,57 +110,58 @@ def _filter_results_for_intent(results: list[dict], detected_type: str) -> list[
 
     return results
 
-
 # ─────────────────────────────────────────────
 # CONTENT EXTRACTOR
 # ─────────────────────────────────────────────
-async def _fetch_page_content(url: str, max_chars: int = 2000) -> str:
-    # Do not try to extract text from Google's internal links/widgets
+async def _fetch_page_content(url: str, snippet: str = "", max_chars: int = 2000) -> str:
     if "google.com/search" in url:
-        return ""
+        return snippet
+
+    parsed_domain = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+    if any(blocked in parsed_domain for blocked in BOT_BLOCKED_DOMAINS):
+        return snippet[:max_chars]
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.connect_over_cdp(
-                "wss://chrome.browserless.io/chromium?token=2UOWCOBFSNBWTTncd4bc93d4394d0b27d022c9d5351201ff1"
+            browser = await p.chromium.connect_over_cdp(BROWSERLESS_URL)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                locale="en-IN",
+                timezone_id="Asia/Kolkata"
             )
-            context = await browser.new_context()
             page = await context.new_page()
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(1000)
+                
                 await page.evaluate("""
                     const remove = ['script','style','nav','footer',
                                     'header','aside','iframe',
                                     '.ad','[class*="cookie"]',
                                     '[class*="banner"]','[class*="popup"]'];
                     remove.forEach(sel => {
-                        document.querySelectorAll(sel).forEach(el => el.remove());
+                        document.querySelectorAll(sel).forEach(el => el?.remove());
                     });
                 """)
                 content = ""
-                for selector in ["article", "main", "[role='main']",
-                                  ".article-body", ".post-content",
-                                  ".entry-content", "#content", "body"]:
+                for selector in ["article", "main", "[role='main']", ".article-body", ".post-content", ".entry-content", "#content", "body"]:
                     el = await page.query_selector(selector)
                     if el:
                         content = await el.inner_text()
                         content = " ".join(content.split())
                         if len(content) > 200:
                             break
-                return content[:max_chars] if content else ""
-            except Exception as e:
-                print(f"[DEBUG] Content fetch error for {url}: {e}")
-                return ""
+                return content[:max_chars] if content else snippet[:max_chars]
+            except Exception:
+                return snippet[:max_chars]
             finally:
                 await browser.close()
-    except Exception as e:
-        print(f"[DEBUG] Playwright content error: {e}")
-        return ""
+    except Exception:
+        return snippet[:max_chars]
 
 
 # ─────────────────────────────────────────────
-# GOOGLE SEARCH (Primary & Only Web Engine)
+# GOOGLE SEARCH (Primary Web Engine)
 # ─────────────────────────────────────────────
 async def _do_google_search(query: str, max_results: int, detected_type: str) -> list:
     encoded_query = urllib.parse.quote(query)
@@ -152,110 +169,97 @@ async def _do_google_search(query: str, max_results: int, detected_type: str) ->
     results = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(
-            "wss://chrome.browserless.io/chromium?token=2UOWCOBFSNBWTTncd4bc93d4394d0b27d022c9d5351201ff1"
+        browser = await p.chromium.connect_over_cdp(BROWSERLESS_URL)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            locale="en-IN",
+            timezone_id="Asia/Kolkata",
+            extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"}
         )
-        context = await browser.new_context()
-        
-        # 🔥 ADVANCED STEALTH
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-            window.navigator.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-IN', 'en-US', 'en'] });
-        """)
 
         page = await context.new_page()
-        
+
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(2000) # Slightly longer wait to let heavy Sports widgets load
-            print(f"[DEBUG] Google page title: {await page.title()}")
+            await page.wait_for_timeout(1500)
 
-            # Extract results with Universal Fallback Parser
+            # 🔥 AUTO-CLICK GOOGLE COOKIE CONSENT BANNER IF IT APPEARS
+            try:
+                if await page.locator("button:has-text('Reject all')").count() > 0:
+                    await page.locator("button:has-text('Reject all')").first.click()
+                    await page.wait_for_timeout(1500)
+                elif await page.locator("button:has-text('Accept all')").count() > 0:
+                    await page.locator("button:has-text('Accept all')").first.click()
+                    await page.wait_for_timeout(1500)
+            except Exception:
+                pass
+
             results_data = await page.evaluate("""
                 (typeStr) => {
                     const items = [];
                     const seenUrls = new Set();
-                    
-                    // 1) Extract Google's TIME widget ONLY if asked
+
                     if (typeStr === 'time') {
                         const timeBox = document.querySelector('div[role="heading"][aria-level="3"], .gsrt.vk_bk');
                         const locBox = document.querySelector('span.vk_gy.vk_sh');
                         if (timeBox && timeBox.textContent.match(/\\d/)) {
-                            const timeText = timeBox.textContent.trim();
-                            const locText = locBox ? locBox.textContent.trim() : "India (IST)";
                             items.push({
-                                title: "Current Time: " + timeText + " " + locText,
+                                title: "Current Time: " + timeBox.textContent.trim() + (locBox ? " " + locBox.textContent.trim() : ""),
                                 href: "https://www.google.com/search?q=time",
-                                snippet: "The exact current time is " + timeText,
+                                snippet: "The exact current time is " + timeBox.textContent.trim(),
                                 is_onebox: true
                             });
                         }
                     }
 
-                    // 2) Extract Google's SPORTS SCOREBOARD widget ONLY if asked
                     if (typeStr === 'sports') {
-                        const sportsBox = document.querySelector('div.imso_mh__mh-xs, div.imso-loa, div[data-attrid="match_details"]');
+                        const sportsBox = document.querySelector('div.imso_mh__mh-xs, div.imso-loa, div[data-attrid="match_details"], .imspo_mt__mt-t');
                         if (sportsBox) {
-                            const text = sportsBox.innerText.replace(/\\n/g, ' | ').replace(/\\s+/g, ' ');
-                            items.push({
-                                title: "Google Sports Live Status",
-                                href: "https://www.google.com/search?q=sports",
-                                snippet: text.substring(0, 400),
-                                is_onebox: true
-                            });
-                        }
-                    }
-
-                    // 3) Universal Organic/News Parser (Finds ALL a > h3 tags)
-                    document.querySelectorAll('a').forEach(a => {
-                        const h3 = a.querySelector('h3');
-                        if (h3) {
-                            const title = h3.textContent.trim();
-                            const href = a.getAttribute('href') || '';
-                            
-                            // Exclude internal Google links (Related searches, etc.)
-                            if (title && href.startsWith('http') && !href.includes('google.com/search') && !seenUrls.has(href)) {
-                                seenUrls.add(href);
-                                
-                                let snippet = '';
-                                // Try to find the closest paragraph text
-                                const container = a.closest('.g, .tF2Cxc, [data-sok]') || a.parentElement.parentElement;
-                                if (container) {
-                                    const snippetEl = container.querySelector('.VwiC3b, .yXK7lf, .MUxGbd, [style*="-webkit-line-clamp"]');
-                                    if (snippetEl) snippet = snippetEl.textContent.trim();
-                                }
-                                
+                            const text = sportsBox.innerText.replace(/\\n/g, ' | ').replace(/\\s+/g, ' ').trim();
+                            if (text.length > 20) {
                                 items.push({
-                                    title: title,
-                                    href: href,
-                                    snippet: snippet,
-                                    is_onebox: false
+                                    title: "Google Sports Live: " + text.substring(0, 80),
+                                    href: "https://www.google.com/search?q=ipl+match+today",
+                                    snippet: text.substring(0, 500),
+                                    is_onebox: true
                                 });
                             }
                         }
+                    }
+
+                    document.querySelectorAll('a').forEach(a => {
+                        const h3 = a.querySelector('h3');
+                        if (!h3) return;
+
+                        const title = h3.textContent.trim();
+                        const href = a.getAttribute('href') || '';
+
+                        if (title && href.startsWith('http') && !href.includes('google.com/search') && !seenUrls.has(href)) {
+                            seenUrls.add(href);
+                            let snippet = '';
+                            const container = a.closest('.g, .tF2Cxc, .MjjYud, [data-sok]') || a.parentElement?.parentElement;
+                            if (container) {
+                                const snippetEl = container.querySelector('.VwiC3b, .yXK7lf, .MUxGbd, .lEBKkf, [style*="-webkit-line-clamp"]');
+                                if (snippetEl) snippet = snippetEl.textContent.trim();
+                            }
+                            items.push({ title, href, snippet, is_onebox: false });
+                        }
                     });
-                    
+
                     return items;
                 }
             """, detected_type)
 
             for item in results_data:
-                if len(results) >= max_results:
-                    break
-
+                if len(results) >= max_results: break
                 href = item['href']
                 source = "google.com" if item.get('is_onebox') else urllib.parse.urlparse(href).netloc
-                
                 results.append({
                     "title": item['title'],
                     "url": href,
                     "snippet": item['snippet'],
                     "source": source
                 })
-                prefix = "🌟 OneBox" if item.get('is_onebox') else "✅ Google"
-                print(f"[DEBUG] {prefix}: {item['title'][:60]}")
 
         except Exception as e:
             print(f"[DEBUG] Google error: {e}")
@@ -263,7 +267,6 @@ async def _do_google_search(query: str, max_results: int, detected_type: str) ->
             await browser.close()
     
     return results
-
 
 # ─────────────────────────────────────────────
 # NEWS SEARCH
@@ -274,18 +277,24 @@ async def _do_news_search(query: str, max_results: int) -> list:
     results = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(
-            "wss://chrome.browserless.io/chromium?token=2UOWCOBFSNBWTTncd4bc93d4394d0b27d022c9d5351201ff1"
+        browser = await p.chromium.connect_over_cdp(BROWSERLESS_URL)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0",
+            locale="en-IN"
         )
-        context = await browser.new_context()
-        
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => false });")
         page = await context.new_page()
-        
+
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
-            print(f"[DEBUG] News page title: {await page.title()}")
+
+            # 🔥 AUTO-CLICK GOOGLE COOKIE CONSENT BANNER IF IT APPEARS
+            try:
+                if await page.locator("button:has-text('Reject all')").count() > 0:
+                    await page.locator("button:has-text('Reject all')").first.click()
+                    await page.wait_for_timeout(1500)
+            except Exception:
+                pass
 
             articles = await page.query_selector_all("article")
             for article in articles:
@@ -294,14 +303,14 @@ async def _do_news_search(query: str, max_results: int) -> list:
                     title_el  = await article.query_selector("a.gPFEn, h3, h4")
                     link_el   = await article.query_selector("a")
                     source_el = await article.query_selector("div.vr1PYe, a.wEwyrc")
-                    
+
                     title_text = await title_el.text_content() if title_el else ""
                     href       = await link_el.get_attribute("href") if link_el else ""
                     source     = await source_el.text_content() if source_el else ""
-                    
+
                     if href and href.startswith("./"):
                         href = f"https://news.google.com/{href[2:]}"
-                    
+
                     if title_text and href:
                         results.append({
                             "title": title_text.strip(),
@@ -317,49 +326,34 @@ async def _do_news_search(query: str, max_results: int) -> list:
             await browser.close()
     return results
 
-
 # ─────────────────────────────────────────────
 # PUBLIC API
 # ─────────────────────────────────────────────
 async def fetch_google_results(query: str, max_results: int = 5) -> list:
-    print(f"[DEBUG] Original query: {query}")
-    
     rewritten_query, detected_type = _rewrite_query(query)
-    print(f"[DEBUG] Rewritten query: {rewritten_query}")
-    print(f"[DEBUG] Detected type: {detected_type}")
     
-    # 1️⃣ Google Search (Primary & Only Web Engine)
     result = await _do_google_search(rewritten_query, max_results + 5, detected_type)
-    
-    # ✅ Filter results
     result = _filter_results_for_intent(result, detected_type)
-    print(f"[DEBUG] Google result count after filter: {len(result)}")
-
-    # Ensure we only return max requested
     result = result[:max_results]
-    print(f"[DEBUG] Final result count before enrich: {len(result)}")
-    
+
     if not result:
         return []
 
     async def enrich(item: dict) -> dict:
         raw_url = item["url"].split("#")[0]
-        content = await _fetch_page_content(raw_url, 2000)
-        item["content"] = content or item.get("snippet", "")
+        snippet = item.get("snippet", "")
+        content = await _fetch_page_content(raw_url, snippet, 2000)
+        item["content"] = content or snippet
         item["detected_type"] = detected_type
-        print(f"[DEBUG] Content ({len(item['content'])} chars): {item['title'][:50]}")
         return item
 
     enriched = await asyncio.gather(*[enrich(item) for item in result])
     return [r for r in enriched if r]
 
-
 async def fetch_news_results(query: str, max_results: int = 5) -> list:
     result = await _do_news_search(query, max_results)
-    print(f"[DEBUG] News result count: {len(result)}")
     return result or []
 
-
 async def fetch_trends_results(query: str, max_results: int = 5) -> list:
-    trend_query = f"{query} trends {datetime.now(timezone.utc).year}"
+    trend_query = f"{query} trends {_get_ist_date_str()}"
     return await fetch_google_results(trend_query, max_results)
