@@ -105,9 +105,8 @@ async def _fetch_page_content(url: str, max_chars: int = 2000) -> str:
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
+            browser = await p.chromium.connect_over_cdp(
+                "wss://chrome.browserless.io?token=YOUR_API_KEY_HERE"
             )
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -157,14 +156,8 @@ async def _do_google_search(query: str, max_results: int, detected_type: str) ->
     results = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox", 
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars"
-            ]
+        browser = await p.chromium.connect_over_cdp(
+            "wss://chrome.browserless.io?token=YOUR_API_KEY_HERE"
         )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -290,9 +283,8 @@ async def _do_news_search(query: str, max_results: int) -> list:
     results = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True, 
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
+        browser = await p.chromium.connect_over_cdp(
+            "wss://chrome.browserless.io?token=YOUR_API_KEY_HERE"
         )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0",
